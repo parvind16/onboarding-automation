@@ -1,4 +1,3 @@
-# app/main.py
 
 from fastapi import FastAPI, HTTPException
 from pydantic import ValidationError
@@ -9,18 +8,17 @@ from app.workflow_store import WorkflowStore
 
 app = FastAPI(
     title="Employee Onboarding Automation",
-    description=(
-        "API for automating employee onboarding workflows."
-    ),
+    description="API for automating employee onboarding workflows.",
     version="1.0.0",
 )
 
-# Shared in-memory connector for this demo.
+# Shared orchestrator with persistent SQLite workflow storage.
 connector_orchestrator = OnboardingOrchestrator(
     store=WorkflowStore("onboarding.db")
 )
 
-@app.get("/health")
+
+@app.get("/health", summary="Health Check")
 def health_check() -> dict[str, str]:
     return {"status": "healthy"}
 
@@ -28,13 +26,25 @@ def health_check() -> dict[str, str]:
 @app.post(
     "/onboarding",
     response_model=OnboardingResponse,
+    summary="Start Onboarding",
 )
+def create_onboarding(
+    request: OnboardingRequest,
+) -> OnboardingResponse:
+    try:
+        return connector_orchestrator.run(request)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=exc.errors(),
+        ) from exc
+
 
 @app.post(
     "/onboarding/{employee_id}/resume",
     response_model=OnboardingResponse,
+    summary="Resume Onboarding",
 )
-
 def resume_onboarding(
     employee_id: str,
 ) -> OnboardingResponse:
@@ -51,15 +61,3 @@ def resume_onboarding(
     )
 
     return connector_orchestrator.run(request, resume=True)
-
-def create_onboarding(
-    request: OnboardingRequest,
-) -> OnboardingResponse:
-    try:
-        return connector_orchestrator.run(request)
-
-    except ValidationError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail=exc.errors(),
-        ) from exc
