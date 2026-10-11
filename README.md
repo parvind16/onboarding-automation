@@ -1,100 +1,44 @@
-# Employee Onboarding Automation
+# BetterUp Employee Onboarding Automation
 
-A Python-based onboarding automation service that coordinates employee onboarding across multiple People and IT systems through a single API.
+A Python/FastAPI prototype demonstrating employee onboarding automation, cross-system data validation, and safe propagation of employee changes.
 
-The project demonstrates workflow orchestration, input validation, retry handling, failure reporting, and SQLite-based workflow persistence.
+## Problem
 
-## Problem Statement
+Employee onboarding involves multiple systems, including Ashby, Workday, Okta/Lumos, equipment provisioning, and a cohort tracker. When employee information changes, inconsistent records can lead to access, equipment, and scheduling issues.
 
-Employee onboarding often involves several separate tasks across HR, identity management, orientation scheduling, and email systems. Manual coordination can cause delays, repeated actions, and limited visibility into failures.
-
-This service automates the onboarding workflow and tracks its progress.
+This prototype demonstrates how to validate a change before propagating it to downstream systems.
 
 ## Features
 
-* **REST API:** Built with FastAPI and Pydantic.
-* **Input validation:** Validates employee information, email addresses, and start dates.
-* **Workflow orchestration:** Coordinates four onboarding steps in sequence.
-* **Retry handling:** Retries failed operations up to three attempts with exponential backoff.
-* **Failure handling:** Stops the workflow when a step fails and reports the failed step.
-* **Workflow persistence:** Uses SQLite to store workflow status and completed steps.
-* **Resume support:** Supports resuming failed workflows through the resume endpoint, when configured.
-* **Automated tests:** Uses pytest to validate successful workflows, validation failures, connector failures, duplicate requests, and retry behavior.
+* Request validation using Pydantic.
+* Onboarding workflow orchestration with mock connectors.
+* Cross-system validation before employee changes are propagated.
+* Conflict detection to prevent unsafe updates.
+* Idempotent handling of repeated change requests.
+* Retry handling and resumable onboarding workflows.
+* Automated tests using pytest.
+* Interactive API documentation through FastAPI Swagger UI.
 
-## Architecture
-
-```text
-Client / API Consumer
-        |
-        v
-   FastAPI API
-        |
-        v
-Input Validation
-        |
-        v
-Onboarding Orchestrator
-        |
-        +----------------------+
-        |                      |
-        v                      v
- Retry and Error         SQLite Workflow
- Handling                Store
-        |
-        v
-Onboarding Connectors
-        |
-        +--> Create Employee Record
-        |
-        +--> Provision Accounts
-        |
-        +--> Schedule Orientation
-        |
-        +--> Send Welcome Email
-```
-
-## Technology Stack
+## Technology stack
 
 * Python 3.12+
 * FastAPI
 * Pydantic
-* SQLite
+* SQLite for onboarding workflow state
+* Pytest
 * uv for dependency and environment management
-* pytest and HTTPX for testing
-
-## Project Structure
-
-```text
-onboarding-automation/
-├── app/
-│   ├── __init__.py
-│   ├── main.py
-│   ├── models.py
-│   ├── connectors.py
-│   ├── validation.py
-│   ├── orchestrator.py
-│   └── workflow_store.py
-├── tests/
-│   └── test_orchestrator.py
-├── README.md
-├── BUILD_NOTE.md
-├── pyproject.toml
-└── uv.lock
-```
 
 ## Prerequisites
 
-* Python 3.12 or later
-* uv
+* Python 3.12 or newer.
+* `uv` installed.
 
-Install uv using the official installation instructions: https://docs.astral.sh/uv/getting-started/installation/
+## Setup
 
-## Getting Started
-
-Clone the repository and enter the project directory:
+Clone the repository:
 
 ```bash
-git clone <YOUR_GITHUB_REPOSITORY_URL>
+git clone https://github.com/parvind16/onboarding-automation.git
 cd onboarding-automation
 ```
 
@@ -104,13 +48,7 @@ Install dependencies:
 uv sync
 ```
 
-Run the automated tests:
-
-```bash
-uv run pytest -v
-```
-
-Start the API:
+## Run the application
 
 ```bash
 uv run uvicorn app.main:app --reload
@@ -120,85 +58,54 @@ Open the interactive API documentation:
 
 http://127.0.0.1:8000/docs
 
-## API Endpoints
+Health check:
 
-| Method | Endpoint                           | Purpose                                                 |
-| ------ | ---------------------------------- | ------------------------------------------------------- |
-| GET    | `/health`                          | Check API health                                        |
-| POST   | `/onboarding`                      | Start an employee onboarding workflow                   |
-| POST   | `/onboarding/{employee_id}/resume` | Resume a failed workflow, if enabled in the application |
+http://127.0.0.1:8000/health
 
-### Example Request
+## Try change propagation
+
+Use `POST /changes/propagate` in Swagger UI with this example request:
 
 ```json
 {
-  "employee_id": "EMP001",
-  "first_name": "Rahul",
-  "last_name": "Sharma",
-  "email": "rahul@example.com",
-  "department": "Engineering",
-  "manager_email": "manager@example.com",
-  "start_date": "2099-01-15",
-  "equipment_required": true
+  "change_id": "CHG-001",
+  "employee_id": "EMP-DEMO-01",
+  "source_system": "ashby",
+  "field_name": "department",
+  "old_value": "Engineering",
+  "new_value": "Product",
+  "requested_by": "hr@example.com"
 }
 ```
 
-Use a future start date when testing, or replace the example date with a valid future date.
+Expected behavior:
 
-### Example Successful Response
+* The service verifies that Ashby contains the approved new value.
+* It checks that Workday and the cohort tracker still contain the expected old value.
+* If validation succeeds, both mock systems are updated.
+* If a conflict is detected, the service rejects the change without updating either target.
+* Repeating the same request returns the stored result.
 
-```json
-{
-  "employee_id": "EMP001",
-  "status": "completed",
-  "completed_steps": [
-    "create_employee_record",
-    "provision_accounts",
-    "schedule_orientation",
-    "send_welcome_email"
-  ],
-  "failed_step": null,
-  "message": "Employee onboarding completed successfully."
-}
-```
+The demo employee is seeded in memory when the application starts.
 
-The exact response depends on the application's current response model.
-
-## Reliability and Error Handling
-
-The orchestrator executes onboarding steps sequentially. Each operation can be retried up to three times with exponential backoff. If an operation continues to fail, the workflow records the failure and returns a response identifying the failed step.
-
-SQLite stores workflow status and completed steps so that progress can be inspected and used by resume logic.
-
-The current connectors are **mock implementations** for demonstrating the workflow. Production deployment would require integration with real HR, identity, scheduling, and email systems, along with authentication, authorization, monitoring, and appropriate safeguards against duplicate side effects.
-
-## Testing
-
-Run:
+## Run tests
 
 ```bash
 uv run pytest -v
 ```
 
-The test suite covers:
+The test suite covers onboarding behavior, retries, validation, change propagation, conflict handling, and idempotency.
 
-* Successful onboarding
-* Rejection of past start dates
-* Employee and manager email validation
-* Connector failure handling
-* Duplicate onboarding requests
-* Retry behavior after a transient failure
+## Architecture and design decisions
 
-## Future Improvements
+The prototype separates onboarding orchestration from change propagation. The change propagation service validates all target records before writing updates, and it uses a change ID to handle duplicate requests.
 
-* Integrate real HR and identity management APIs.
-* Add authentication and role-based authorization.
-* Add structured logs, tracing, metrics, and audit history.
-* Add workflow timeouts and controlled retry policies.
-* Improve recovery for partially completed external operations.
-* Add integration tests against simulated external services.
-* Add CI automation using GitHub Actions.
+Deterministic rules are used for data validation because identity and employee-record changes should be predictable and testable.
 
-## Design Goal
+For design rationale, failure handling, idempotency, AI-assisted development notes, and production considerations, see [BUILD_NOTE.md](BUILD_NOTE.md).
 
-Build a maintainable onboarding automation service that demonstrates practical API development, workflow coordination, reliability, and recovery across multiple enterprise systems.
+## Scope and limitations
+
+All People-system integrations are mocked. This prototype does not connect to BetterUp's live systems and does not implement a live Claude API or MCP integration.
+
+In production, I would add authenticated system connectors, durable change-event storage, audit history, monitoring, rate-limit-aware retries, recovery for partial failures, and authorization controls.
