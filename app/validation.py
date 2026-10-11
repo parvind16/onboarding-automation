@@ -1,4 +1,3 @@
-# app/validation.py
 
 from datetime import date
 
@@ -20,3 +19,11 @@ def validate_onboarding_request(
 
     if not request.department.strip():
         raise ValueError("Department cannot be empty.")
+
+    if request.work_location is not None:
+        if not request.work_location.strip():
+            raise ValueError("Work location cannot be blank.")
+
+    if request.shipping_address is not None:
+        if not request.shipping_address.strip():
+            raise ValueError("Shipping address cannot be blank.")

@@ -5,11 +5,30 @@ from pydantic import ValidationError
 from app.models import OnboardingRequest, OnboardingResponse
 from app.orchestrator import OnboardingOrchestrator
 from app.workflow_store import WorkflowStore
+from app.change_propagation import ChangePropagationService
+from app.models import EmployeeChangeRequest, ChangePropagationResponse
 
 app = FastAPI(
     title="Employee Onboarding Automation",
     description="API for automating employee onboarding workflows.",
     version="1.0.0",
+)
+
+change_service = ChangePropagationService()
+
+change_service.seed_employee(
+    "EMP-DEMO-01",
+    {
+        "ashby": {
+            "department": "Product",
+        },
+        "workday": {
+            "department": "Engineering",
+        },
+        "cohort_tracker": {
+            "department": "Engineering",
+        },
+    },
 )
 
 # Shared orchestrator with persistent SQLite workflow storage.
@@ -61,3 +80,13 @@ def resume_onboarding(
     )
 
     return connector_orchestrator.run(request, resume=True)
+
+@app.post(
+    "/changes/propagate",
+    response_model=ChangePropagationResponse,
+    summary="Validate and Propagate Employee Change",
+)
+def propagate_employee_change(
+    request: EmployeeChangeRequest,
+) -> ChangePropagationResponse:
+    return change_service.process_change(request)
