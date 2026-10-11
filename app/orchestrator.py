@@ -82,10 +82,10 @@ class OnboardingOrchestrator:
             if workflow["status"] == "completed":
                 return OnboardingResponse(
                     employee_id=employee_id,
-                    status="failed",
+                    status="completed",
                     completed_steps=workflow["completed_steps"],
-                    failed_step="create_employee_record",
-                    message="Employee record already exists. Duplicate onboarding rejected.",
+                    failed_step=None,
+                    message="Onboarding was already completed.",
                 )
 
             if not resume and workflow["status"] == "failed":

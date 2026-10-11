@@ -87,8 +87,7 @@ def test_stops_when_connector_fails() -> None:
     assert "EMP001" not in connector.orientation_bookings
     assert "EMP001" not in connector.welcome_emails_sent
 
-
-def test_duplicate_employee_is_rejected() -> None:
+def test_duplicate_employee_is_idempotent() -> None:
     connector = MockPeopleSystemConnector()
     orchestrator = OnboardingOrchestrator(connector)
 
@@ -96,9 +95,17 @@ def test_duplicate_employee_is_rejected() -> None:
     second_response = orchestrator.run(make_request())
 
     assert first_response.status == "completed"
-    assert second_response.status == "failed"
-    assert second_response.failed_step == "create_employee_record"
+    assert second_response.status == "completed"
 
+    assert second_response.completed_steps == [
+        "create_employee_record",
+        "provision_accounts",
+        "schedule_orientation",
+        "send_welcome_email",
+    ]
+
+    assert second_response.failed_step is None
+    assert second_response.message == "Onboarding was already completed."
 
 def test_retry_succeeds_after_transient_failure():
     attempts = 0
