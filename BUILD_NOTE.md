@@ -1,87 +1,116 @@
-# BetterUp Employee Onboarding Automation
+# Build note: cross-system change propagation
 
-## 1. Problem and approach
+## 1. Why this slice
 
-Employee onboarding depends on multiple systems, including Ashby, Workday, Okta/Lumos, equipment provisioning, and the cohort tracker. When employee information changes after an offer, inconsistent updates can create access, equipment, and scheduling issues.
+The brief names three slices: **change propagation, cross-system validation, exception
+monitoring.** I built propagation because the other two are partly *inside* it:
 
-This prototype focuses on **cross-system validation and safe change propagation**. It checks that the source system contains the approved new value and that downstream systems still contain the expected previous value before updating them.
+* **Validation-only** tells you a value is wrong but leaves the fix manual, and the manual fix is
+  where the breakage happens today. Propagation makes validation a precondition for every
+  write (validate all targets, then write), so I get validation for free.
+* **Exception monitoring** detects late gates but not wrong data. Propagation's conflict path
+  *is* an exception handler: it detects drift, triages it (Claude), and pages a human.
+* **Blast radius:** a changed start date silently breaks equipment (7-day ship lead), Okta
+  provisioning timing and the tracker at once. It is also the only slice where a bad write is
+  hard to undo, so it is where engineering care pays off most.
 
-The implementation uses mock systems and sample data. It does not connect to BetterUp's live systems.
+I did not have real frequency data. The leverage case rests on the brief's own statements
+(hiring fast, changes after offer, manual and undocumented today). With BetterUp numbers I'd
+replace that with changes per hire × systems touched × minutes per manual fix.
 
-## 2. Architecture
+Excluded on purpose: the 7-day gate monitoring (needs deadline data from systems not modelled
+here). See `docs/SYSTEMS_MAP.md` for the map, break points and flow.
 
-The prototype has two workflows:
+## 2. Stack discipline
 
-* **Onboarding workflow:** validates an onboarding request and executes onboarding steps through a mock connector.
-* **Change propagation workflow:** validates an employee change against mock system records and propagates it to relevant downstream systems only when validation succeeds.
+| Need | Existing stack used | Added |
+|---|---|---|
+| Trigger on Ashby changes | Ashby webhook → **n8n** (or Zapier) calling `POST /changes/propagate` | none |
+| Source of truth / targets | Ashby, Workday, Okta/Lumos, equipment, cohort tracker (mocked connectors, one per system) | none |
+| Human escalation | **Slack** | none |
+| Triage of conflicts | **Claude** via API | none |
 
-Change propagation flow:
+**The one thing I added is this small service (FastAPI + SQLite), and I'd defend it narrowly.**
+n8n/Zapier are strong at linear trigger → action flows. What this problem needs, and what I
+would not want to build out of nodes, is: (1) check *all* targets before writing *any*,
+(2) compensating rollback when the third write fails, (3) durable idempotency keys with
+crash-resume, and (4) per-system field mapping/transforms (e.g. equipment ship-by = start − 7).
+So n8n stays as the trigger/router layer and calls this service for the stateful part. If BetterUp's
+n8n can already express (1)–(3) reliably, I would drop the service and port the connectors, which is
+the first thing I'd verify.
 
-1. Receive a change request with a unique change ID.
-2. Confirm that Ashby contains the expected new value.
-3. Check each target system against the expected old value.
-4. If any check fails, return a conflict without updating any target.
-5. If all checks pass, update the target systems and return the result.
-6. Return the stored result when the same change request is submitted again.
+SQLite stands in for whatever durable store the platform team prefers; nothing depends on it.
 
-## 3. Technology choices
+## 3. Claude as a component
 
-* Python for the workflow and business logic.
-* FastAPI for HTTP endpoints and interactive API documentation.
-* Pydantic for request and response validation.
-* SQLite for the existing onboarding workflow store.
-* Pytest for automated tests.
-* In-memory mock connectors for change propagation.
+`app/classifier.py`. When validation finds a conflict, Claude receives a **redacted** structured
+report (emails masked) and must call one tool, `classify_conflict`, returning
+`{category, recommended_action, confidence, rationale}`.
 
-The implementation uses deterministic business rules for reconciliation. An LLM is not needed to decide whether employee records match because those checks must be predictable and testable.
+Guardrails that make it safe to use:
 
-## 4. Data model
+* **Claude never decides validity and never writes.** Deterministic code decided there was a
+  conflict before Claude was called; the output is advisory.
+* **Forced tool-use + Pydantic validation.** A value outside the enum is rejected.
+* **Deterministic guardrails after the call:** confidence < 0.7 → escalate; a conflict in Ashby
+  itself can't recommend "refresh old value"; identity fields (manager, location) can't be
+  auto-refreshed. The applied guardrail is recorded in the response.
+* **Failure isolation:** timeout, HTTP error, malformed output, or an exception falls back to a
+  rule-based classifier. Propagation results never depend on the model being up.
+* **Untrusted data:** system values are treated as data in the prompt; because output is
+  schema-bound and guard-railed, an injected instruction in a field value can at worst yield a
+  wrong *advisory* label, never a write.
 
-The change request includes:
+Without `ANTHROPIC_API_KEY` the service uses the rule-based classifier, so demo and tests run
+offline. **Status: the Claude path is unit-tested against a fake transport (request shape,
+parsing, redaction, every fallback). I have not yet run it against the live API.** Run it once
+with a real key before the walkthrough.
 
-* `change_id`: unique identifier for a change event.
-* `employee_id`: employee affected by the change.
-* `source_system`: source of the approved change, currently Ashby.
-* `field_name`: supported field being changed.
-* `old_value`: expected existing value in downstream systems.
-* `new_value`: approved new value.
-* `requested_by`: requester email address.
+## 4. Key design decisions
 
-The response reports the change status, updated systems, conflicts, and a message.
+* **Data model.** `changes(change_id PK, payload, status in_progress|done, result)` and an
+  append-only `audit_log(change_id, ts, event, detail)`. The audit trail is exposed at
+  `GET /changes/{id}/audit`.
+* **Idempotency.** Same `change_id` + same payload → stored result, nothing rewritten.
+  Same id + different payload → rejected. Keys survive restarts (tested with a file DB). A
+  retention method (`purge_older_than`) drops finished keys after N days; unfinished rows are
+  never purged.
+* **Crash-resume.** A repeat of an `in_progress` change re-runs; a target already holding the
+  new value counts as OK and is not rewritten.
+* **Failure handling.** Reads and writes retry on `ConnectorError` only, 3 attempts with
+  exponential backoff (0.25s, 0.5s). If a write still fails, targets already written this run are
+  restored. If a restore fails too, the response lists the stuck systems, says manual
+  reconciliation is required, and Slack is paged.
+* **PII.** Slack messages carry the change/employee id, field name and conflict category, never
+  values or model-written text (the rationale stays in the API response and audit trail). Emails
+  are masked before they go to Claude; other field values (department, location) are sent as-is.
 
-## 5. Error handling and idempotency
+## 5. What I'd productionize
 
-The service rejects changes when the source value is incorrect or any target system differs from the expected old value. It validates all targets before updating any of them, preventing partial updates in the in-memory prototype.
+1. Real authenticated connectors (OAuth/SSO or service accounts, secrets in a vault).
+2. Per-employee locking or queue partitioning; today a process-wide lock serialises changes.
+3. A reconciliation job that periodically re-reads systems and detects drift that no change
+   event announced (the real fix for non-atomic cross-system writes).
+4. Dead-letter queue and alerting on repeated integration failures; rate-limit handling.
+5. Human-approval step for identity-affecting fields before write, not just after conflict.
+6. Contract tests per connector; run the Claude path against recorded fixtures in CI.
+7. Zero-retention / data-processing review before sending any employee data to a model.
+8. Move the 7-day gate monitoring onto the same audit/notifier foundation.
 
-Repeated requests with the same change ID and identical payload return the stored result. Reusing a change ID with a different payload is rejected.
+Known limits: mocked systems are in-memory and reseeded on start; cross-system writes are not
+atomic (compensation is best-effort); a replayed result reflects the original run, not
+current system state.
 
-The existing onboarding workflow also supports retries, recorded completed steps, and explicit resumption after failure.
+## 6. AI tools and where they were wrong
 
-## 6. Testing
+Tools: Claude (drafting, review and this revision after the feedback round).
 
-The automated tests cover onboarding success, business-rule validation, connector failure, retries, duplicate onboarding, successful change propagation, conflicting target data, duplicate change requests, and change-ID reuse.
-
-Run the suite with:
-
-`uv run pytest -v`
-
-## 7. Production considerations
-
-Before production use, I would:
-
-1. Replace mock connectors with authenticated API integrations for Ashby, Workday, Okta/Lumos, equipment, and the cohort tracker.
-2. Persist change events, idempotency keys, system responses, and audit history in a durable database.
-3. Add access controls, secret management, input authorization, and PII-safe logging.
-4. Implement bounded retries with timeouts, backoff, rate-limit handling, and dead-letter handling for persistent failures.
-5. Use a durable workflow or reconciliation process to detect and recover from partial failures across external systems.
-6. Add monitoring and alerts for conflicts, overdue onboarding gates, and repeated integration failures.
-7. Require human approval for sensitive changes, such as access or identity changes, where appropriate.
-8. Add integration tests, contract tests, and observability before enabling real writes.
-
-The current implementation is a prototype: in-memory change state does not survive restarts, and updates across real external systems cannot be made atomic by a local Python loop.
-
-## 8. AI-assisted development
-
-AI assistance was used to help draft and review implementation code. One issue occurred when validation logic referenced `work_location` before that field had been added to the Pydantic request model. The automated tests exposed the `AttributeError`; the model was updated and the tests were rerun successfully.
-
-No live Claude API or MCP integration is implemented in this prototype. The core reconciliation logic is deterministic. A future AI component could classify unstructured exception details and recommend remediation, while keeping authorization and actual system updates under deterministic rules and, where needed, human approval.
+* **Wrote vs delegated:** _[Parvind: fill in your own split here. e.g. which modules you wrote by
+  hand, which Claude drafted and you rewrote. The feedback asked for this granularity and only
+  you can state it truthfully.]_
+* **Wrong #1 (earlier round):** validation referenced `work_location` before it existed on the
+  Pydantic model. Tests raised `AttributeError`; I fixed the model.
+* **Wrong #2 (this round):** my first demo script claimed a repeat change with a new ID would
+  conflict. Running it against the live server showed it propagated as a no-op, which is the
+  intended "already at new value is OK" rule that makes crash-resume safe. The script was wrong,
+  not the service, so I replaced the scenario with a genuinely stale request and kept the rule.

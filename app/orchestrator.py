@@ -2,38 +2,16 @@
 # app/orchestrator.py
 
 import logging
-import time
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any
 
 from app.connectors import MockPeopleSystemConnector
 from app.models import OnboardingRequest, OnboardingResponse
+from app.retry import retry_operation
 from app.validation import validate_onboarding_request
 from app.workflow_store import WorkflowStore
 
 logger = logging.getLogger(__name__)
-T = TypeVar("T")
-
-
-def retry_operation(
-    operation: Callable[[], T],
-    *,
-    max_attempts: int = 3,
-    base_delay: float = 0.25,
-    sleep: Callable[[float], None] = time.sleep,
-) -> T:
-    if max_attempts < 1:
-        raise ValueError("max_attempts must be at least 1")
-
-    for attempt in range(max_attempts):
-        try:
-            return operation()
-        except Exception:
-            if attempt == max_attempts - 1:
-                raise
-            sleep(base_delay * (2 ** attempt))
-
-    raise RuntimeError("Operation failed unexpectedly")
 
 
 class OnboardingOrchestrator:

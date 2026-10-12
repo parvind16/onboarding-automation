@@ -1,4 +1,6 @@
 
+import os
+
 from fastapi import FastAPI, HTTPException
 from pydantic import ValidationError
 
@@ -6,6 +8,8 @@ from app.models import OnboardingRequest, OnboardingResponse
 from app.orchestrator import OnboardingOrchestrator
 from app.workflow_store import WorkflowStore
 from app.change_propagation import ChangePropagationService
+from app.change_store import ChangeStore
+from app.classifier import get_default_classifier
 from app.models import EmployeeChangeRequest, ChangePropagationResponse
 
 app = FastAPI(
@@ -14,19 +18,41 @@ app = FastAPI(
     version="1.0.0",
 )
 
-change_service = ChangePropagationService()
+# Durable idempotency keys + audit trail. Claude classifies conflicts when
+# ANTHROPIC_API_KEY is set; deterministic rules otherwise.
+change_service = ChangePropagationService(
+    store=ChangeStore(os.getenv("CHANGE_DB", "changes.db")),
+    classifier=get_default_classifier(),
+)
 
+# Mock systems are in-memory and reseeded on every start. Ashby already holds
+# the approved values; downstream systems still hold the old ones.
 change_service.seed_employee(
     "EMP-DEMO-01",
     {
         "ashby": {
             "department": "Product",
+            "manager_email": "new.manager@example.com",
+            "start_date": "2026-11-16",
+            "work_location": "Austin",
         },
         "workday": {
             "department": "Engineering",
+            "manager_email": "old.manager@example.com",
+            "start_date": "2026-11-09",
+            "work_location": "Denver",
+        },
+        "okta_lumos": {
+            "manager_email": "old.manager@example.com",
+            "work_location": "Denver",
+        },
+        "equipment": {
+            "start_date": "2026-11-09",
+            "work_location": "Denver",
         },
         "cohort_tracker": {
             "department": "Engineering",
+            "start_date": "2026-11-09",
         },
     },
 )
@@ -90,3 +116,14 @@ def propagate_employee_change(
     request: EmployeeChangeRequest,
 ) -> ChangePropagationResponse:
     return change_service.process_change(request)
+
+
+@app.get(
+    "/changes/{change_id}/audit",
+    summary="Audit trail for a change",
+)
+def change_audit_trail(change_id: str) -> list[dict]:
+    trail = change_service.store.audit_trail(change_id)
+    if not trail:
+        raise HTTPException(status_code=404, detail="Change not found")
+    return trail
